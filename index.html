@@ -279,6 +279,7 @@
               <label class="field"><span>受付開始</span><input type="time" id="tmplOpenStart" value="10:00"></label>
               <label class="field"><span>受付終了</span><input type="time" id="tmplOpenEnd" value="16:00"></label>
               <label class="field"><span>1枠の長さ（分）</span><input type="number" id="tmplSlotMinutes" min="5" step="5" value="30"></label>
+              <label class="field"><span>1枠あたりの人数（初期値）</span><input type="number" id="tmplDefaultCapacity" min="0" value="1"></label>
               <button type="button" class="btn-secondary" id="btnGenerateSlots" style="margin-top:0;">区間から時間枠を生成</button>
               <div id="slotRows" style="margin-top:14px;"></div>
               <button type="button" class="btn-secondary" id="btnAddSlotRow">＋ 時間枠を1つ追加</button>
@@ -368,6 +369,30 @@ const state = {
   currentEditDay: null,
   dbConnectionError: false
 };
+
+// ============ POLLING (自動更新) ============
+let customerPollTimer=null;
+let adminPollTimer=null;
+function stopCustomerPolling(){if(customerPollTimer){clearInterval(customerPollTimer);customerPollTimer=null;}}
+function startCustomerPolling(fn,intervalMs){stopCustomerPolling();fn();customerPollTimer=setInterval(fn,intervalMs);}
+function stopAdminPolling(){if(adminPollTimer){clearInterval(adminPollTimer);adminPollTimer=null;}}
+function startAdminPolling(fn,intervalMs){stopAdminPolling();fn();adminPollTimer=setInterval(fn,intervalMs);}
+function updateCustomerPolling(screenName){
+  stopCustomerPolling();
+  if(screenName==='calendar'){startCustomerPolling(refreshCalendarData,20000);}
+  else if(screenName==='time'){startCustomerPolling(refreshSlotData,10000);}
+}
+function updateAdminPolling(tabName){
+  stopAdminPolling();
+  if(tabName==='reservations'){
+    startAdminPolling(()=>{
+      const date=document.getElementById('viewDateInput').value;
+      if(date) viewDateReservations();
+    },15000);
+  }else if(tabName==='staff'){
+    startAdminPolling(renderStaffList,15000);
+  }
+}
 
 // ============ HELPERS ============
 function pad2(n){return String(n).padStart(2,'0');}
@@ -481,6 +506,7 @@ function computeDayStatus(date){
 function showScreen(name){
   document.querySelectorAll('#customerView .screen').forEach(s=>s.classList.add('hidden'));
   document.getElementById(`screen-${name}`).classList.remove('hidden');
+  updateCustomerPolling(name);
 }
 
 function getMonthsToShow(){
@@ -495,26 +521,40 @@ function getMonthsToShow(){
 
 async function initCustomer(){
   showScreen('loading');
-  const [general,dayConfigs]=await Promise.all([loadGeneral(),loadDayConfigs()]);
+  const general=await loadGeneral();
   state.general=general;
-  state.dayConfigs=dayConfigs;
   document.getElementById('bizName').textContent=general.businessName||'ふれあい体験予約';
 
   const months=getMonthsToShow();
   state.calendarMonths=months;
-  const today=today_str_safe();
-  const lastMonth=months[2];
-  const rangeEnd=dateFromYMD(lastMonth.year,lastMonth.month,daysInMonth(lastMonth.year,lastMonth.month));
+  await loadCalendarData();
 
-  const openDates=Object.keys(dayConfigs).filter(d=>d>=today&&d<=rangeEnd);
-  const pairs=await Promise.all(openDates.map(async d=>[d,await loadReservations(d)]));
-  state.reservationsCache=Object.fromEntries(pairs);
-
-  document.getElementById('noOpenDaysMsg').classList.toggle('hidden', Object.keys(dayConfigs).length>0);
+  document.getElementById('noOpenDaysMsg').classList.toggle('hidden', Object.keys(state.dayConfigs).length>0);
 
   renderCalendar();
   showDbErrorBannerIfNeeded();
   showScreen('calendar');
+}
+async function loadCalendarData(){
+  const dayConfigs=await loadDayConfigs();
+  state.dayConfigs=dayConfigs;
+  const today=today_str_safe();
+  const lastMonth=state.calendarMonths[2];
+  const rangeEnd=dateFromYMD(lastMonth.year,lastMonth.month,daysInMonth(lastMonth.year,lastMonth.month));
+  const openDates=Object.keys(dayConfigs).filter(d=>d>=today&&d<=rangeEnd);
+  const pairs=await Promise.all(openDates.map(async d=>[d,await loadReservations(d)]));
+  state.reservationsCache=Object.fromEntries(pairs);
+}
+async function refreshCalendarData(){
+  await loadCalendarData();
+  renderCalendar();
+}
+async function refreshSlotData(){
+  if(!state.selectedDate) return;
+  const [dayConfigs,resv]=await Promise.all([loadDayConfigs(),loadReservations(state.selectedDate)]);
+  state.dayConfigs=dayConfigs;
+  state.reservationsCache[state.selectedDate]=resv;
+  renderTimeSlots();
 }
 function today_str_safe(){return todayStr();}
 
@@ -687,6 +727,7 @@ function initAdmin(){
     b.classList.add('active');
     document.getElementById('tab-'+b.dataset.tab).classList.add('active');
     if(b.dataset.tab==='staff') renderStaffList();
+    updateAdminPolling(b.dataset.tab);
   }));
 
   document.getElementById('btnNewTemplate').addEventListener('click',()=>openTemplateEditor(null));
@@ -697,8 +738,9 @@ function initAdmin(){
     const os=document.getElementById('tmplOpenStart').value;
     const oe=document.getElementById('tmplOpenEnd').value;
     const sm=parseInt(document.getElementById('tmplSlotMinutes').value,10);
+    const cap=parseInt(document.getElementById('tmplDefaultCapacity').value,10)||0;
     if(!os||!oe||!sm) return;
-    state.editingTemplate.slots=buildSlotsFromRange(os,oe,sm,1);
+    state.editingTemplate.slots=buildSlotsFromRange(os,oe,sm,cap);
     renderSlotRows();
   });
   document.getElementById('btnAddSlotRow').addEventListener('click',()=>{
@@ -827,6 +869,8 @@ function openTemplateEditor(id){
   document.getElementById('tmplOpenStart').value=state.editingTemplate.openStart;
   document.getElementById('tmplOpenEnd').value=state.editingTemplate.openEnd;
   document.getElementById('tmplSlotMinutes').value=state.editingTemplate.slotMinutes;
+  document.getElementById('tmplDefaultCapacity').value=
+    state.editingTemplate.slots.length>0 ? state.editingTemplate.slots[0].capacity : 1;
   renderSlotRows();
   document.getElementById('templateEditorPanel').classList.remove('hidden');
 }
@@ -908,6 +952,7 @@ async function viewDateReservations(){
   const date=document.getElementById('viewDateInput').value;
   if(!date) return;
   const list=document.getElementById('adminReservationList');
+  if(list.querySelector('.btn-cancel-res[data-armed="1"]')) return;
   list.innerHTML='<p class="admin-empty">読み込み中…</p>';
   const reservations=(await loadReservations(date)).sort((a,b)=>a.time.localeCompare(b.time));
   if(reservations.length===0){
