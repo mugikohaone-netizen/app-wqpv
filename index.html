@@ -178,6 +178,7 @@
       <section id="screen-calendar" class="screen hidden">
         <h2 class="step-title">① 日付を選択</h2>
         <p class="cal-legend"><span>○ 空きあり</span><span>△ 残りわずか</span><span>× 満員</span></p>
+        <p class="error-msg db-error-banner hidden">データベースに接続できませんでした。しばらくしてから再度お試しいただくか、運営者にお問い合わせください。</p>
         <p id="noOpenDaysMsg" class="admin-empty hidden">現在予約受付中の日程はありません。</p>
         <div id="calendarContainer"></div>
         <button type="button" class="menu-link" id="btnGoCancel">予約の確認・取り消しはこちら</button>
@@ -255,6 +256,7 @@
 
     <main id="adminView">
       <section id="admin-panel" class="screen">
+        <p class="error-msg db-error-banner hidden">データベースに接続できませんでした。コード内のWORKER_URLの設定をご確認ください。</p>
         <div class="tab-row">
           <button type="button" class="tab-btn active" data-tab="templates">型の管理</button>
           <button type="button" class="tab-btn" data-tab="calendar">カレンダー設定</button>
@@ -347,6 +349,11 @@
 // 配布前に必ず変更してください（管理画面に入るための合言葉です。URLの末尾に ?admin=合言葉 を付けてアクセスします）
 const ADMIN_KEY = "karate_pagu";
 
+// Cloudflare Worker のURL（末尾の / は付けない）
+// デプロイ後に表示される *.workers.dev のURLを貼ってください
+// 例: "https://makiba-reservation-api.yamada.workers.dev"
+const WORKER_URL = "https://makiba-reservation-api.mugikoha-one.workers.dev";
+
 // ============ STATE ============
 const state = {
   general: {businessName:''},
@@ -358,7 +365,8 @@ const state = {
   calendarMonths: [],
   cancelTarget: null,
   editingTemplate: null,
-  currentEditDay: null
+  currentEditDay: null,
+  dbConnectionError: false
 };
 
 // ============ HELPERS ============
@@ -415,15 +423,45 @@ function armConfirm(btn,action){
   }
 }
 
-// ============ STORAGE ============
-async function loadGeneral(){try{const r=await window.storage.get('general',true);return r?JSON.parse(r.value):{businessName:''};}catch(e){return {businessName:''};}}
-async function saveGeneral(g){await window.storage.set('general',JSON.stringify(g),true);}
-async function loadTemplates(){try{const r=await window.storage.get('templates',true);return r?JSON.parse(r.value):[];}catch(e){return [];}}
-async function saveTemplates(t){await window.storage.set('templates',JSON.stringify(t),true);}
-async function loadDayConfigs(){try{const r=await window.storage.get('dayConfigs',true);return r?JSON.parse(r.value):{};}catch(e){return {};}}
-async function saveDayConfigs(d){await window.storage.set('dayConfigs',JSON.stringify(d),true);}
-async function loadReservations(date){try{const r=await window.storage.get('res:'+date,true);return r?JSON.parse(r.value):[];}catch(e){return [];}}
-async function saveReservations(date,arr){await window.storage.set('res:'+date,JSON.stringify(arr),true);}
+// ============ STORAGE (Cloudflare Workers KV) ============
+async function apiGet(path){
+  try{
+    const res = await fetch(`${WORKER_URL}/api/${path}`);
+    if(!res.ok){ state.dbConnectionError = true; return null; }
+    return await res.json();
+  }catch(e){
+    console.error('Worker get error:', e);
+    state.dbConnectionError = true;
+    return null;
+  }
+}
+async function apiSet(path, value){
+  try{
+    const res = await fetch(`${WORKER_URL}/api/${path}`,{
+      method:'PUT',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(value)
+    });
+    if(!res.ok){ state.dbConnectionError = true; }
+  }catch(e){
+    console.error('Worker set error:', e);
+    state.dbConnectionError = true;
+  }
+}
+
+async function loadGeneral(){const v=await apiGet('general');return v||{businessName:''};}
+async function saveGeneral(g){await apiSet('general',g);}
+async function loadTemplates(){const v=await apiGet('templates');return v||[];}
+async function saveTemplates(t){await apiSet('templates',t);}
+async function loadDayConfigs(){const v=await apiGet('dayConfigs');return v||{};}
+async function saveDayConfigs(d){await apiSet('dayConfigs',d);}
+async function loadReservations(date){const v=await apiGet('reservations/'+date);return v||[];}
+async function saveReservations(date,arr){await apiSet('reservations/'+date,arr);}
+
+function showDbErrorBannerIfNeeded(){
+  if(!state.dbConnectionError) return;
+  document.querySelectorAll('.db-error-banner').forEach(el=>el.classList.remove('hidden'));
+}
 
 // ============ STATUS ============
 function computeDayStatus(date){
@@ -475,6 +513,7 @@ async function initCustomer(){
   document.getElementById('noOpenDaysMsg').classList.toggle('hidden', Object.keys(dayConfigs).length>0);
 
   renderCalendar();
+  showDbErrorBannerIfNeeded();
   showScreen('calendar');
 }
 function today_str_safe(){return todayStr();}
@@ -747,6 +786,7 @@ async function loadAdminData(){
   document.getElementById('setBizName').value=general.businessName||'';
   renderTemplateList();
   populateTemplateSelect();
+  showDbErrorBannerIfNeeded();
 }
 
 function renderTemplateList(){
