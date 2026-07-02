@@ -98,6 +98,8 @@
 
   /* calendar */
   .cal-legend{display:flex;justify-content:center;gap:14px;font-size:.72rem;color:var(--muted);margin:0 0 18px;flex-wrap:wrap;}
+  .btn-refresh{display:block;margin:0 0 18px;background:var(--sky-wash);color:var(--barn-green);border:none;border-radius:20px;padding:9px 16px;font-size:.8rem;font-family:'Zen Maru Gothic',sans-serif;font-weight:700;cursor:pointer;}
+  .btn-refresh:disabled{opacity:.6;}
   .cal-month{margin-bottom:26px;}
   .cal-month h3{font-family:'Kaisei Decol',serif;font-size:1rem;color:var(--barn-green);margin:0 0 10px;text-align:center;}
   .cal-weekdays{display:grid;grid-template-columns:repeat(7,1fr);text-align:center;font-size:.7rem;color:var(--muted);margin-bottom:4px;}
@@ -178,6 +180,7 @@
       <section id="screen-calendar" class="screen hidden">
         <h2 class="step-title">① 日付を選択</h2>
         <p class="cal-legend"><span>○ 空きあり</span><span>△ 残りわずか</span><span>× 満員</span></p>
+        <button type="button" class="btn-refresh" id="btnRefreshCalendar">🔄 空き状況を更新</button>
         <p class="error-msg db-error-banner hidden">データベースに接続できませんでした。しばらくしてから再度お試しいただくか、運営者にお問い合わせください。</p>
         <p id="noOpenDaysMsg" class="admin-empty hidden">現在予約受付中の日程はありません。</p>
         <div id="calendarContainer"></div>
@@ -188,6 +191,7 @@
         <button class="btn-back" data-back="calendar">← カレンダーに戻る</button>
         <h2 class="step-title">② 時間を選択</h2>
         <p class="selected-date-label" id="selectedDateLabel"></p>
+        <button type="button" class="btn-refresh" id="btnRefreshSlots">🔄 空き状況を更新</button>
         <div id="slotGrid" class="slot-grid"></div>
       </section>
 
@@ -196,8 +200,7 @@
         <h2 class="step-title">③ お客様情報</h2>
         <p class="selected-info" id="selectedInfoLabel"></p>
         <form id="reservationForm">
-          <label class="field"><span>お名前<em>必須</em></span><input type="text" id="inputName" required placeholder="例）山田 太郎"></label>
-          <label class="field"><span>連絡先（電話番号など）<em>必須</em></span><input type="text" id="inputContact" required placeholder="例）090-1234-5678"></label>
+          <label class="field"><span>お名前またはニックネーム<em>必須</em></span><input type="text" id="inputName" required placeholder="例）山田 太郎 / たろう"></label>
           <label class="field"><span>人数</span><input type="number" id="inputGroupSize" min="1" value="1" required></label>
           <label class="field"><span>ご要望・メモ（任意）</span><textarea id="inputNote" rows="2" placeholder="アレルギーなど、あればご記入ください"></textarea></label>
           <button type="submit" class="btn-primary">この内容で予約する</button>
@@ -327,6 +330,7 @@
         <!-- 本日・明日一覧 -->
         <div class="admin-tabpanel" id="tab-staff">
           <h2 class="step-title">本日・明日の予約者一覧</h2>
+          <button type="button" class="btn-refresh" id="btnRefreshStaff">🔄 更新</button>
           <div id="staffListContainer"></div>
         </div>
 
@@ -370,28 +374,13 @@ const state = {
   dbConnectionError: false
 };
 
-// ============ POLLING (自動更新) ============
-let customerPollTimer=null;
-let adminPollTimer=null;
-function stopCustomerPolling(){if(customerPollTimer){clearInterval(customerPollTimer);customerPollTimer=null;}}
-function startCustomerPolling(fn,intervalMs){stopCustomerPolling();fn();customerPollTimer=setInterval(fn,intervalMs);}
-function stopAdminPolling(){if(adminPollTimer){clearInterval(adminPollTimer);adminPollTimer=null;}}
-function startAdminPolling(fn,intervalMs){stopAdminPolling();fn();adminPollTimer=setInterval(fn,intervalMs);}
-function updateCustomerPolling(screenName){
-  stopCustomerPolling();
-  if(screenName==='calendar'){startCustomerPolling(refreshCalendarData,20000);}
-  else if(screenName==='time'){startCustomerPolling(refreshSlotData,10000);}
-}
-function updateAdminPolling(tabName){
-  stopAdminPolling();
-  if(tabName==='reservations'){
-    startAdminPolling(()=>{
-      const date=document.getElementById('viewDateInput').value;
-      if(date) viewDateReservations();
-    },15000);
-  }else if(tabName==='staff'){
-    startAdminPolling(renderStaffList,15000);
-  }
+// ============ 手動更新 ============
+async function handleManualRefresh(btn,fn){
+  const orig=btn.textContent;
+  btn.disabled=true;
+  btn.textContent='更新中…';
+  try{ await fn(); }
+  finally{ btn.disabled=false; btn.textContent=orig; }
 }
 
 // ============ HELPERS ============
@@ -506,7 +495,6 @@ function computeDayStatus(date){
 function showScreen(name){
   document.querySelectorAll('#customerView .screen').forEach(s=>s.classList.add('hidden'));
   document.getElementById(`screen-${name}`).classList.remove('hidden');
-  updateCustomerPolling(name);
 }
 
 function getMonthsToShow(){
@@ -597,9 +585,7 @@ async function selectDate(date){
     formatDateLabel(date)+(cfg.eventName?'　'+cfg.eventName:'')+'の空き状況';
   showScreen('time');
   document.getElementById('slotGrid').innerHTML='<p class="admin-empty">読み込み中…</p>';
-  if(!state.reservationsCache[date]){
-    state.reservationsCache[date]=await loadReservations(date);
-  }
+  state.reservationsCache[date]=await loadReservations(date);
   renderTimeSlots();
 }
 
@@ -640,10 +626,9 @@ async function submitReservation(e){
   const errEl=document.getElementById('formError');
   errEl.classList.add('hidden');
   const name=document.getElementById('inputName').value.trim();
-  const contact=document.getElementById('inputContact').value.trim();
   const groupSize=parseInt(document.getElementById('inputGroupSize').value,10)||1;
   const note=document.getElementById('inputNote').value.trim();
-  if(!name||!contact){return;}
+  if(!name){return;}
 
   const submitBtn=e.target.querySelector('button[type="submit"]');
   submitBtn.disabled=true;
@@ -664,7 +649,7 @@ async function submitReservation(e){
     }
     const ticket={
       id:generateTicketNo(state.selectedDate,state.selectedTime),
-      time:state.selectedTime,name,contact,groupSize,note,
+      time:state.selectedTime,name,groupSize,note,
       createdAt:new Date().toISOString()
     };
     current.push(ticket);
@@ -727,7 +712,6 @@ function initAdmin(){
     b.classList.add('active');
     document.getElementById('tab-'+b.dataset.tab).classList.add('active');
     if(b.dataset.tab==='staff') renderStaffList();
-    updateAdminPolling(b.dataset.tab);
   }));
 
   document.getElementById('btnNewTemplate').addEventListener('click',()=>openTemplateEditor(null));
@@ -809,6 +793,7 @@ function initAdmin(){
   });
 
   document.getElementById('btnViewDate').addEventListener('click',viewDateReservations);
+  document.getElementById('btnRefreshStaff').addEventListener('click',(e)=>handleManualRefresh(e.currentTarget,renderStaffList));
 
   document.getElementById('generalForm').addEventListener('submit',async(e)=>{
     e.preventDefault();
@@ -963,7 +948,7 @@ async function viewDateReservations(){
     <div class="admin-res-row" data-id="${r.id}">
       <div>
         <strong>${r.time}　${r.name}様（${r.groupSize}名）</strong><br>
-        <span class="meta">No.${r.id}</span>　${r.contact||''}${r.note?'<br><span class="meta">'+r.note+'</span>':''}
+        <span class="meta">No.${r.id}</span>${r.note?'<br><span class="meta">'+r.note+'</span>':''}
       </div>
       <button type="button" class="btn-cancel-res" data-id="${r.id}" data-date="${date}">取消</button>
     </div>
@@ -1005,7 +990,7 @@ async function renderStaffList(){
       return `<div class="staff-block"><h3>${heading}</h3><p class="admin-empty">予約はまだありません</p></div>`;
     }
     const rows=b.resv.map(r=>`
-      <div class="staff-row"><span class="t">${r.time}</span>${r.name}様（${r.groupSize}名）${r.contact?' / '+r.contact:''}
+      <div class="staff-row"><span class="t">${r.time}</span>${r.name}様（${r.groupSize}名）
       ${r.note?'<br><span class="note">'+r.note+'</span>':''}</div>
     `).join('');
     return `<div class="staff-block"><h3>${heading}</h3>${rows}</div>`;
@@ -1025,6 +1010,8 @@ window.addEventListener('DOMContentLoaded',()=>{
     document.getElementById('btnCancelLookup').addEventListener('click',cancelLookup);
     document.getElementById('btnDoCancel').addEventListener('click',doCancel);
     document.getElementById('btnCancelDoneBack').addEventListener('click',initCustomer);
+    document.getElementById('btnRefreshCalendar').addEventListener('click',(e)=>handleManualRefresh(e.currentTarget,refreshCalendarData));
+    document.getElementById('btnRefreshSlots').addEventListener('click',(e)=>handleManualRefresh(e.currentTarget,refreshSlotData));
     document.querySelectorAll('[data-back]').forEach(btn=>{
       btn.addEventListener('click',()=>showScreen(btn.dataset.back));
     });
